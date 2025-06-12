@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
@@ -42,15 +43,26 @@ func main() {
 
 	os.MkdirAll("./images", os.ModePerm)
 
-	for _, src := range images {
-		err := downloadImage(src, "./images")
-		if err != nil {
-			fmt.Println("Failed :(")
-		} else {
-			fmt.Println("Downloaded:=> ", src)
-		}
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 5) // max 5 concurrent downloads
 
+	for _, src := range images {
+		wg.Add(1)
+		sem <- struct{}{}
+
+		go func(url string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			if err := downloadImage(url, "./images"); err != nil {
+				fmt.Println("Failed :", url)
+			} else {
+				fmt.Println("Downloaded:", url)
+			}
+		}(src)
 	}
+
+	wg.Wait()
 
 }
 
@@ -82,28 +94,6 @@ func collectImageLinks(url string, totalScroll int) ([]string, error) {
 		return nil, err
 	}
 
-	cookies, err := loadCookiesFromJSON("pinterest_cookies.json")
-	if err != nil {
-		return nil, err
-	}
-
-	var cookieList []*network.CookieParam
-	for _, c := range cookies {
-		if c.Name == "" || c.Value == "" || strings.HasPrefix(c.Domain, ".") {
-			continue
-		}
-		cookieList = append(cookieList, &network.CookieParam{
-			Name:   c.Name,
-			Value:  c.Value,
-			Domain: c.Domain,
-			Path:   c.Path,
-		})
-	}
-
-	if err := chromedp.Run(ctx, network.SetCookies(cookieList)); err != nil {
-		return nil, fmt.Errorf("failed to set cookies: %w", err)
-	}
-
 	if err := chromedp.Run(ctx, chromedp.Navigate(url)); err != nil {
 		return nil, err
 	}
@@ -116,7 +106,7 @@ func collectImageLinks(url string, totalScroll int) ([]string, error) {
 
 		err := chromedp.Run(ctx,
 			chromedp.Evaluate(`window.scrollBy(0, 500)`, nil),
-			chromedp.Sleep(500*time.Millisecond),
+			chromedp.Sleep(1*time.Second),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scroll failed at %d: %w", i, err)
@@ -133,7 +123,7 @@ func collectImageLinks(url string, totalScroll int) ([]string, error) {
 		}
 	}
 
-	fmt.Printf("\nTotal unique image URLs collected: %d\n", len(imageSet))
+	fmt.Printf("\nCollected %d unique image URLs.\n", len(imageSet))
 
 	var images []string
 	for img := range imageSet {
