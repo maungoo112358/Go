@@ -1,37 +1,29 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
-	"golang.org/x/net/html"
+	"github.com/PuerkitoBio/goquery"
+	"github.com/chromedp/chromedp"
 )
 
 func main() {
 
 	baseURL := "https://unsplash.com/"
-	resp, err := http.Get(baseURL)
+	totalScroll := 10000
 
+	images, err := collectImageLinks(baseURL, totalScroll)
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
-
-	defer resp.Body.Close()
-	doc, err := html.Parse(resp.Body)
-
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	parsedURL, _ := url.Parse(baseURL)
-	var images []string
-	extractImgSrcs(doc, parsedURL, &images)
 
 	// for _, image := range images {
 	// 	fmt.Println("Image URL=> ", image)
@@ -44,45 +36,64 @@ func main() {
 		if err != nil {
 			fmt.Println("Failed :(")
 		} else {
-			fmt.Println("Downlaoded:=> ", src)
+			fmt.Println("Downloaded:=> ", src)
 		}
 
 	}
 
 }
 
-func extractImgSrcs(n *html.Node, base *url.URL, list *[]string) {
+func extractHighestResImages(html string) []string {
 
-	if n.Type == html.ElementNode && n.Data == "img" {
-		var imageUrl string
+	var images []string
 
-		for _, attr := range n.Attr {
-			if attr.Key == "src" {
-				imageUrl = attr.Val
-			}
+	doc, _ := goquery.NewDocumentFromReader(strings.NewReader(html))
 
-			if attr.Key == "srcset" && imageUrl == "" {
-				parts := strings.Split(attr.Val, ",")
-				last := strings.TrimSpace(parts[len(parts)-1])
-				urlPart := strings.Fields(last)[0]
-				imageUrl = urlPart
-			}
+	doc.Find("img").Each(func(i int, s *goquery.Selection) {
+		if srcset, exists := s.Attr("srcset"); exists {
+			parts := strings.Split(srcset, ",")
+			lasts := strings.TrimSpace(parts[len(parts)-1])
+			url := strings.Fields(lasts)[0]
+			images = append(images, url)
+		} else if src, exists := s.Attr("src"); exists {
+			images = append(images, src)
 		}
+	})
+	return images
+}
 
-		if imageUrl != "" {
-			resolved, err := base.Parse(imageUrl)
+func collectImageLinks(url string, totalScroll int) ([]string, error) {
+	ctx, cancel := chromedp.NewContext(context.Background())
+	defer cancel()
 
-			if err == nil {
-				*list = append(*list, resolved.String())
-			}
-		}
-
+	if err := chromedp.Run(ctx, chromedp.Navigate(url)); err != nil {
+		return nil, err
 	}
 
-	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		extractImgSrcs(c, base, list)
+	var html string
+	spinner := []rune{'|', '/', '-', '\\'}
+
+	for i := 0; i < totalScroll; i++ {
+		fmt.Printf("\r Scrolling %d/%d %c", i+1, totalScroll, spinner[i%len(spinner)])
+
+		err := chromedp.Run(ctx,
+			chromedp.Evaluate(`window.scrollBy(0,1200)`, nil),
+			chromedp.Sleep(100*time.Microsecond),
+		)
+
+		if err != nil {
+			return nil, fmt.Errorf("scroll failed on iteration %d: %w", i, err)
+		}
+	}
+	fmt.Println("\nExtracting HTML...")
+
+	err := chromedp.Run(ctx, chromedp.OuterHTML("html", &html))
+	if err != nil {
+		return nil, fmt.Errorf("failed to get HTML: %w", err)
 	}
 
+	images := extractHighestResImages(html)
+	return images, nil
 }
 
 func downloadImage(imageURL, outputDir string) error {
