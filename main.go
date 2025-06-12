@@ -2,23 +2,34 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
+	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
 )
 
 func main() {
 
-	baseURL := "https://unsplash.com/"
-	totalScroll := 10000
+	cmd := runCMD()
+	defer cmd.Process.Kill()
+
+	if err := waitForChromeReady("9222", 10*time.Second); err != nil {
+		log.Fatal(err)
+	}
+
+	baseURL := "https://www.pinterest.com/"
+	totalScroll := 100
 
 	images, err := collectImageLinks(baseURL, totalScroll)
 	if err != nil {
@@ -63,36 +74,72 @@ func extractHighestResImages(html string) []string {
 }
 
 func collectImageLinks(url string, totalScroll int) ([]string, error) {
-	ctx, cancel := chromedp.NewContext(context.Background())
-	defer cancel()
+	allocatorCtx, _ := chromedp.NewRemoteAllocator(context.Background(), "http://localhost:9222")
+	ctx, cancelCtx := chromedp.NewContext(allocatorCtx)
+	defer cancelCtx()
+
+	if err := chromedp.Run(ctx, network.Enable()); err != nil {
+		return nil, err
+	}
+
+	cookies, err := loadCookiesFromJSON("pinterest_cookies.json")
+	if err != nil {
+		return nil, err
+	}
+
+	var cookieList []*network.CookieParam
+	for _, c := range cookies {
+		if c.Name == "" || c.Value == "" || strings.HasPrefix(c.Domain, ".") {
+			continue
+		}
+		cookieList = append(cookieList, &network.CookieParam{
+			Name:   c.Name,
+			Value:  c.Value,
+			Domain: c.Domain,
+			Path:   c.Path,
+		})
+	}
+
+	if err := chromedp.Run(ctx, network.SetCookies(cookieList)); err != nil {
+		return nil, fmt.Errorf("failed to set cookies: %w", err)
+	}
 
 	if err := chromedp.Run(ctx, chromedp.Navigate(url)); err != nil {
 		return nil, err
 	}
 
-	var html string
+	imageSet := make(map[string]struct{})
 	spinner := []rune{'|', '/', '-', '\\'}
 
 	for i := 0; i < totalScroll; i++ {
-		fmt.Printf("\r Scrolling %d/%d %c", i+1, totalScroll, spinner[i%len(spinner)])
+		fmt.Printf("\rScrolling %d/%d %c", i+1, totalScroll, spinner[i%len(spinner)])
 
 		err := chromedp.Run(ctx,
-			chromedp.Evaluate(`window.scrollBy(0,1200)`, nil),
-			chromedp.Sleep(100*time.Microsecond),
+			chromedp.Evaluate(`window.scrollBy(0, 500)`, nil),
+			chromedp.Sleep(500*time.Millisecond),
 		)
-
 		if err != nil {
-			return nil, fmt.Errorf("scroll failed on iteration %d: %w", i, err)
+			return nil, fmt.Errorf("scroll failed at %d: %w", i, err)
+		}
+
+		var html string
+		if err := chromedp.Run(ctx, chromedp.OuterHTML("html", &html)); err != nil {
+			return nil, fmt.Errorf("failed to extract HTML at scroll %d: %w", i, err)
+		}
+
+		imgs := extractHighestResImages(html)
+		for _, img := range imgs {
+			imageSet[img] = struct{}{}
 		}
 	}
-	fmt.Println("\nExtracting HTML...")
 
-	err := chromedp.Run(ctx, chromedp.OuterHTML("html", &html))
-	if err != nil {
-		return nil, fmt.Errorf("failed to get HTML: %w", err)
+	fmt.Printf("\nTotal unique image URLs collected: %d\n", len(imageSet))
+
+	var images []string
+	for img := range imageSet {
+		images = append(images, img)
 	}
 
-	images := extractHighestResImages(html)
 	return images, nil
 }
 
@@ -129,4 +176,56 @@ func downloadImage(imageURL, outputDir string) error {
 
 	_, err = io.Copy(outFile, resp.Body)
 	return err
+}
+
+func loadCookiesFromJSON(path string) ([]*network.CookieParam, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var raw []map[string]interface{}
+
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+
+	var cookies []*network.CookieParam
+	for _, c := range raw {
+		name := c["name"].(string)
+		value := c["value"].(string)
+		domain := c["domain"].(string)
+		path := c["path"].(string)
+
+		cookies = append(cookies, &network.CookieParam{
+			Name:   name,
+			Value:  value,
+			Domain: domain,
+			Path:   path,
+		})
+	}
+	return cookies, nil
+}
+
+func runCMD() *exec.Cmd {
+	cmd := exec.Command(`C:\Program Files\Google\Chrome\Application\chrome.exe`, "--remote-debugging-port=9222", "--user-data-dir=C:\\chrome-pinterest-profile")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		log.Fatalf("Failed to start Chrome: %v", err)
+	}
+	return cmd
+}
+
+func waitForChromeReady(port string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get("http://localhost:" + port + "/json/version")
+		if err == nil {
+			resp.Body.Close()
+			return nil
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	return fmt.Errorf("Chrome did not open in time")
 }
