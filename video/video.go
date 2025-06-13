@@ -23,22 +23,10 @@ func DownloadSelectedFormat(url string) error {
 		return err
 	}
 
-	fmt.Println("Available Formats:")
-	for i, f := range video.Formats {
-		if f.QualityLabel != "" {
-			fmt.Printf("[%d] %s (%s)\n", i, f.QualityLabel, f.MimeType)
-		}
+	index, err := getSelectedVideoIndex(video)
+	if err != nil {
+		return err
 	}
-
-	fmt.Println("Enter a format number to download:")
-	reader := bufio.NewReader(os.Stdin)
-	raw, _ := reader.ReadString('\n')
-	indexStr := strings.TrimSpace(raw)
-	index, err := strconv.Atoi(indexStr)
-	if err != nil || index < 0 || index >= len(video.Formats) {
-		return fmt.Errorf("invalid format selection")
-	}
-
 	videoFormat := video.Formats[index]
 
 	var audioFormat *youtube.Format
@@ -52,43 +40,16 @@ func DownloadSelectedFormat(url string) error {
 		return fmt.Errorf("no audio-only format found")
 	}
 
-	videoStream, size, err := client.GetStream(video, &videoFormat)
-	if err != nil {
-		return err
-	}
-
-	videoFile, err := os.Create("video.mp4")
-	if err != nil {
-		return err
-	}
-	defer videoFile.Close()
-
+	videoPath := "video.mp4"
+	audioPath := "audio.m4a"
 	state := &animation.DownloadState{}
-	pr := &animation.ProgressReader{Reader: videoStream, Total: size, State: state}
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go animation.SpinnerAnimation(state, &wg)
-
-	_, err = videoFile.ReadFrom(pr)
-
-	state.Mu.Lock()
-	state.Done = true
-	state.Mu.Unlock()
-	wg.Wait()
-
-	audioStream, _, err := client.GetStream(video, audioFormat)
+	err = downloadVideo(&client, video, &videoFormat, videoPath, state)
 	if err != nil {
 		return err
 	}
 
-	audioFile, err := os.Create("audio.m4a")
-	if err != nil {
-		return err
-	}
-	defer audioFile.Close()
-
-	_, err = io.Copy(audioFile, audioStream)
+	err = downloadAudio(&client, video, audioFormat, audioPath)
 	if err != nil {
 		return err
 	}
@@ -97,14 +58,10 @@ func DownloadSelectedFormat(url string) error {
 	if err != nil {
 		return fmt.Errorf("failed to get home dir: %v", err)
 	}
-	downloadDir := filepath.Join(home, "Desktop", "Video-Download")
-	os.MkdirAll(downloadDir, os.ModePerm)
 
-	// Merge using ffmpeg
-	safeTitle := sanitizeFileName(video.Title)
-	outputName := strings.ReplaceAll(safeTitle, " ", "_") + ".mp4"
-	outputPath := filepath.Join(downloadDir, outputName)
-	cmd := exec.Command("ffmpeg", "-y", "-i", "video.mp4", "-i", "audio.m4a", "-c", "copy", outputPath)
+	outputPath := getOutputPath(video, home)
+
+	cmd := exec.Command("ffmpeg", "-y", "-i", videoPath, "-i", audioPath, "-c", "copy", outputPath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	err = cmd.Run()
@@ -112,16 +69,84 @@ func DownloadSelectedFormat(url string) error {
 		return fmt.Errorf("ffmpeg merge failed: %v", err)
 	}
 
-	videoFile.Close()
-	audioFile.Close()
-
-	os.Remove("video.mp4")
-	os.Remove("audio.m4a")
+	os.Remove(videoPath)
+	os.Remove(audioPath)
 
 	fmt.Println("Download and merge complete:", outputPath)
-
 	return nil
+}
 
+func getOutputPath(video *youtube.Video, home string) string {
+	downloadDir := filepath.Join(home, "Desktop", "Video-Download")
+	os.MkdirAll(downloadDir, os.ModePerm)
+
+	safeTitle := sanitizeFileName(video.Title)
+	outputName := strings.ReplaceAll(safeTitle, " ", "_") + ".mp4"
+	outputPath := filepath.Join(downloadDir, outputName)
+	return outputPath
+}
+
+func getSelectedVideoIndex(video *youtube.Video) (int, error) {
+	fmt.Println("Available Formats:")
+	for i, f := range video.Formats {
+		if f.QualityLabel != "" {
+			fmt.Printf("[%d] %s (%s)\n", i, f.QualityLabel, f.MimeType)
+		}
+	}
+
+	fmt.Println("Enter a format number to download:")
+	reader := bufio.NewReader(os.Stdin)
+	raw, _ := reader.ReadString('\n')
+	indexStr := strings.TrimSpace(raw)
+	index, err := strconv.Atoi(indexStr)
+	if err != nil || index < 0 || index >= len(video.Formats) {
+		return 0, fmt.Errorf("invalid format selection")
+	}
+	return index, nil
+}
+
+func downloadVideo(client *youtube.Client, video *youtube.Video, format *youtube.Format, path string, state *animation.DownloadState) error {
+	stream, size, err := client.GetStream(video, format)
+	if err != nil {
+		return err
+	}
+
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	pr := &animation.ProgressReader{Reader: stream, Total: size, State: state}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go animation.SpinnerAnimation(state, &wg)
+
+	_, err = file.ReadFrom(pr)
+
+	state.Mu.Lock()
+	state.Done = true
+	state.Mu.Unlock()
+	wg.Wait()
+
+	return err
+}
+
+func downloadAudio(client *youtube.Client, video *youtube.Video, format *youtube.Format, path string) error {
+	stream, _, err := client.GetStream(video, format)
+	if err != nil {
+		return err
+	}
+
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	_, err = io.Copy(file, stream)
+	return err
 }
 
 func sanitizeFileName(name string) string {
