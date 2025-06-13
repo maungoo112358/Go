@@ -2,13 +2,12 @@ package video
 
 import (
 	"GoTest/animation"
-	"bufio"
+	"GoTest/input"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -23,7 +22,7 @@ func DownloadSelectedFormat(url string) error {
 		return err
 	}
 
-	index, err := getSelectedVideoIndex(video)
+	index, err := input.GetSelectedVideoIndex(video)
 	if err != nil {
 		return err
 	}
@@ -84,25 +83,6 @@ func getOutputPath(video *youtube.Video, home string) string {
 	outputName := strings.ReplaceAll(safeTitle, " ", "_") + ".mp4"
 	outputPath := filepath.Join(downloadDir, outputName)
 	return outputPath
-}
-
-func getSelectedVideoIndex(video *youtube.Video) (int, error) {
-	fmt.Println("Available Formats:")
-	for i, f := range video.Formats {
-		if f.QualityLabel != "" {
-			fmt.Printf("[%d] %s (%s)\n", i, f.QualityLabel, f.MimeType)
-		}
-	}
-
-	fmt.Println("Enter a format number to download:")
-	reader := bufio.NewReader(os.Stdin)
-	raw, _ := reader.ReadString('\n')
-	indexStr := strings.TrimSpace(raw)
-	index, err := strconv.Atoi(indexStr)
-	if err != nil || index < 0 || index >= len(video.Formats) {
-		return 0, fmt.Errorf("invalid format selection")
-	}
-	return index, nil
 }
 
 func downloadVideo(client *youtube.Client, video *youtube.Video, format *youtube.Format, path string, state *animation.DownloadState) error {

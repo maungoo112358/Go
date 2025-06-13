@@ -3,29 +3,52 @@ package main
 import (
 	"GoTest/input"
 	"GoTest/video"
-	"bufio"
 	"fmt"
-	"os"
 	"strings"
 )
 
 func main() {
+mainLoop:
+	for {
+		url, err := input.ReadInputWithTimeout("Enter YouTube URL (or type 'q' to quit): ", 600)
+		if err != nil {
+			fmt.Println("\nNo activity for 10 minutes. Exiting.")
+			return
+		}
+		if strings.ToLower(url) == "q" {
+			return
+		}
 
-	//https://www.youtube.com/watch?v=G9RpHfPyEx8
-	fmt.Println("Enter Youtube URL=> ")
-	reader := bufio.NewReader(os.Stdin)
-	raw, _ := reader.ReadString('\n')
-	url := strings.TrimSpace(raw)
+		url, err = input.ValidateURL(strings.TrimSpace(url))
+		if err != nil {
+			fmt.Println("Error:", err)
+			continue
+		}
 
-	url, err := input.ValidateURL(url)
-	if err != nil {
-		fmt.Println("Error: ", err)
-		return
-	}
+	downloadLoop:
+		for {
+			err := video.DownloadSelectedFormat(url)
+			if err != nil {
+				fmt.Println("Download failed:", err)
+			}
 
-	fmt.Println("Valid Youtube URL => ", url)
+			choice, err := input.ReadInputWithTimeout("\nWhat next? [1] Same link [2] New link [3] Quit: ", 600)
+			if err != nil {
+				fmt.Println("\nNo activity for 10 minutes. Exiting.")
+				return
+			}
 
-	if err := video.DownloadSelectedFormat(url); err != nil {
-		fmt.Println("Failed to fetch formats: ", err)
+			switch choice {
+			case "1":
+				continue downloadLoop
+			case "2":
+				continue mainLoop // ✅ ask for new link again
+			case "3":
+				return
+			default:
+				fmt.Println("Invalid choice. Exiting.")
+				return
+			}
+		}
 	}
 }
