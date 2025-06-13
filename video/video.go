@@ -60,7 +60,7 @@ func DownloadSelectedFormat(url string) error {
 
 	outputPath := getOutputPath(video, home)
 
-	cmd := exec.Command("ffmpeg", "-y", "-i", videoPath, "-i", audioPath, "-c", "copy", outputPath)
+	cmd := exec.Command("./ffmpeg.exe", "-y", "-i", videoPath, "-i", audioPath, "-c", "copy", outputPath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	err = cmd.Run()
