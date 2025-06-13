@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -92,9 +93,18 @@ func DownloadSelectedFormat(url string) error {
 		return err
 	}
 
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to get home dir: %v", err)
+	}
+	downloadDir := filepath.Join(home, "Desktop", "Video-Download")
+	os.MkdirAll(downloadDir, os.ModePerm)
+
 	// Merge using ffmpeg
-	outputFile := strings.ReplaceAll(video.Title, " ", "_") + ".mp4"
-	cmd := exec.Command("ffmpeg", "-y", "-i", "video.mp4", "-i", "audio.m4a", "-c", "copy", outputFile)
+	safeTitle := sanitizeFileName(video.Title)
+	outputName := strings.ReplaceAll(safeTitle, " ", "_") + ".mp4"
+	outputPath := filepath.Join(downloadDir, outputName)
+	cmd := exec.Command("ffmpeg", "-y", "-i", "video.mp4", "-i", "audio.m4a", "-c", "copy", outputPath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	err = cmd.Run()
@@ -108,7 +118,16 @@ func DownloadSelectedFormat(url string) error {
 	os.Remove("video.mp4")
 	os.Remove("audio.m4a")
 
-	fmt.Println("Download and merge complete:", outputFile)
+	fmt.Println("Download and merge complete:", outputPath)
+
 	return nil
 
+}
+
+func sanitizeFileName(name string) string {
+	invalid := []string{`<`, `>`, `:`, `"`, `/`, `\`, `|`, `?`, `*`}
+	for _, c := range invalid {
+		name = strings.ReplaceAll(name, c, "_")
+	}
+	return name
 }
