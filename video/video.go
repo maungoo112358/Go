@@ -5,6 +5,8 @@ import (
 	"GoTest/input"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,12 +16,31 @@ import (
 	"github.com/kkdai/youtube/v2"
 )
 
-func DownloadSelectedFormat(url string) error {
-	client := youtube.Client{}
-
-	video, err := client.GetVideo(url)
+func DownloadSelectedFormat(rawUrl string) error {
+	parsed, err := url.Parse(rawUrl)
 	if err != nil {
-		return err
+		return fmt.Errorf("invalid url: %v", err)
+	}
+	v := parsed.Query().Get("v")
+	if v == "" {
+		return fmt.Errorf("missing video id (v param)")
+	}
+	cleanUrl := "https://www.youtube.com/watch?v=" + v
+	fmt.Println("Corrected URL:", cleanUrl)
+
+	headerTransport := roundTripperWithHeaders{
+		rt: http.DefaultTransport,
+		headers: map[string]string{
+			"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/113.0.0.0 Safari/537.36",
+		},
+	}
+	client := youtube.Client{
+		HTTPClient: &http.Client{Transport: headerTransport},
+	}
+
+	video, err := client.GetVideo(cleanUrl)
+	if err != nil {
+		return fmt.Errorf("failed to get video: %v", err)
 	}
 
 	index, err := input.GetSelectedVideoIndex(video)
@@ -27,10 +48,13 @@ func DownloadSelectedFormat(url string) error {
 		return err
 	}
 	videoFormat := video.Formats[index]
+	if videoFormat.URL == "" {
+		return fmt.Errorf("selected video format has no URL (ciphered)")
+	}
 
 	var audioFormat *youtube.Format
 	for _, f := range video.Formats {
-		if f.AudioChannels > 0 && f.QualityLabel == "" {
+		if f.AudioChannels > 0 && f.QualityLabel == "" && f.URL != "" {
 			audioFormat = &f
 			break
 		}
@@ -135,4 +159,16 @@ func sanitizeFileName(name string) string {
 		name = strings.ReplaceAll(name, c, "_")
 	}
 	return name
+}
+
+type roundTripperWithHeaders struct {
+	rt      http.RoundTripper
+	headers map[string]string
+}
+
+func (r roundTripperWithHeaders) RoundTrip(req *http.Request) (*http.Response, error) {
+	for k, v := range r.headers {
+		req.Header.Set(k, v)
+	}
+	return r.rt.RoundTrip(req)
 }

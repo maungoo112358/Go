@@ -20,6 +20,7 @@ mainLoop:
 		}
 
 		url, err = input.ValidateURL(strings.TrimSpace(url))
+		fmt.Println("Validated URL:", url)
 		if err != nil {
 			fmt.Println("Error:", err)
 			continue
@@ -42,7 +43,7 @@ mainLoop:
 			case "1":
 				continue downloadLoop
 			case "2":
-				continue mainLoop // ✅ ask for new link again
+				continue mainLoop
 			case "3":
 				return
 			default:
