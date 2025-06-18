@@ -1,121 +1,176 @@
 package main
 
 import (
+	"bufio"
+	"encoding/json"
 	"fmt"
-	"io"
-	"log"
-	"net/http"
-	"net/url"
+	"image"
+	"image/draw"
+	"image/jpeg"
+	"image/png"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"golang.org/x/net/html"
+	"golang.org/x/image/webp"
 )
 
-func main() {
+type Frame struct {
+	X int `json:"x"`
+	Y int `json:"y"`
+	W int `json:"w"`
+	H int `json:"h"`
+}
 
-	baseURL := "https://unsplash.com/"
-	resp, err := http.Get(baseURL)
+type FrameInfo struct {
+	Frame Frame `json:"frame"`
+}
 
+type SpriteSheet struct {
+	Frames map[string]FrameInfo `json:"frames"`
+}
+
+func getDesktopPath() string {
+	home, err := os.UserHomeDir()
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
+	}
+	return filepath.Join(home, "Desktop")
+}
+
+func ensureFolderExists(path string) {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		os.MkdirAll(path, 0755)
+	}
+}
+
+func findFilesByExtensions(dir string, exts []string) []string {
+	matches := []string{}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return matches
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			for _, ext := range exts {
+				if strings.HasSuffix(strings.ToLower(e.Name()), ext) {
+					matches = append(matches, filepath.Join(dir, e.Name()))
+				}
+			}
+		}
+	}
+	return matches
+}
+
+func decodeImage(path string) (image.Image, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".webp":
+		return webp.Decode(f)
+	case ".png":
+		return png.Decode(f)
+	case ".jpg", ".jpeg":
+		return jpeg.Decode(f)
+	default:
+		return nil, fmt.Errorf("unsupported image format: %s", ext)
+	}
+}
+
+func green(text string) string {
+	return "\033[32m" + text + "\033[0m"
+}
+
+func red(text string) string {
+	return "\033[31m" + text + "\033[0m"
+}
+
+func processAtlas(jsonPath, imagePath, outputPath string) {
+	jsonData, err := ioutil.ReadFile(jsonPath)
+	if err != nil {
+		panic(err)
 	}
 
-	defer resp.Body.Close()
-	doc, err := html.Parse(resp.Body)
-
+	var sheet SpriteSheet
+	err = json.Unmarshal(jsonData, &sheet)
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 
-	parsedURL, _ := url.Parse(baseURL)
-	var images []string
-	extractImgSrcs(doc, parsedURL, &images)
+	atlasImg, err := decodeImage(imagePath)
+	if err != nil {
+		panic(err)
+	}
 
-	// for _, image := range images {
-	// 	fmt.Println("Image URL=> ", image)
-	// }
+	os.MkdirAll(outputPath, 0755)
 
-	os.MkdirAll("./images", os.ModePerm)
+	for name, info := range sheet.Frames {
+		rect := image.Rect(info.Frame.X, info.Frame.Y, info.Frame.X+info.Frame.W, info.Frame.Y+info.Frame.H)
+		crop := image.NewRGBA(image.Rect(0, 0, info.Frame.W, info.Frame.H))
+		draw.Draw(crop, crop.Bounds(), atlasImg, rect.Min, draw.Src)
 
-	for _, src := range images {
-		err := downloadImage(src, "./images")
+		outFile := filepath.Join(outputPath, name)
+		os.MkdirAll(filepath.Dir(outFile), 0755)
+		f, err := os.Create(outFile)
 		if err != nil {
-			fmt.Println("Failed :(")
-		} else {
-			fmt.Println("Downlaoded:=> ", src)
+			panic(err)
 		}
-
+		err = png.Encode(f, crop)
+		f.Close()
+		if err != nil {
+			panic(err)
+		}
+		fmt.Println(green("Saved: ") + outFile)
 	}
-
 }
 
-func extractImgSrcs(n *html.Node, base *url.URL, list *[]string) {
+func main() {
+	basePath := filepath.Join(getDesktopPath(), "Atlas Splitter")
+	scanner := bufio.NewScanner(os.Stdin)
 
-	if n.Type == html.ElementNode && n.Data == "img" {
-		var imageUrl string
+	for {
+		ensureFolderExists(basePath)
+		fmt.Printf("\n%s\n%s\n",
+			green("[ Step 1 ] Place exactly one .json and one image file (.webp/.png/.jpg) inside this folder:"),
+			green(basePath))
+		fmt.Print(green("After adding those files, type 'y' to continue or 'n' to quit: "))
 
-		for _, attr := range n.Attr {
-			if attr.Key == "src" {
-				imageUrl = attr.Val
-			}
-
-			if attr.Key == "srcset" && imageUrl == "" {
-				parts := strings.Split(attr.Val, ",")
-				last := strings.TrimSpace(parts[len(parts)-1])
-				urlPart := strings.Fields(last)[0]
-				imageUrl = urlPart
-			}
+		scanner.Scan()
+		input := strings.ToLower(strings.TrimSpace(scanner.Text()))
+		if input != "y" {
+			fmt.Println(green("Exiting."))
+			return
 		}
 
-		if imageUrl != "" {
-			resolved, err := base.Parse(imageUrl)
+		ensureFolderExists(basePath)
 
-			if err == nil {
-				*list = append(*list, resolved.String())
-			}
+		jsonFiles := findFilesByExtensions(basePath, []string{".json"})
+		imageFiles := findFilesByExtensions(basePath, []string{".webp", ".png", ".jpg", ".jpeg"})
+
+		if len(jsonFiles) == 0 {
+			fmt.Println(red("Error: No .json file found."))
+			continue
+		} else if len(jsonFiles) > 1 {
+			fmt.Println(red("Error: Multiple .json files found. Please leave only one."))
+			continue
 		}
 
-	}
-
-	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		extractImgSrcs(c, base, list)
-	}
-
-}
-
-func downloadImage(imageURL, outputDir string) error {
-	u, err := url.Parse(imageURL)
-	if err != nil {
-		return err
-	}
-
-	fileName := filepath.Base(u.Path)
-
-	if !strings.Contains(fileName, ".") {
-		q := u.Query()
-		ext := q.Get("fm")
-		if ext == "" {
-			ext = "jpg"
+		if len(imageFiles) == 0 {
+			fmt.Println(red("Error: No image file (.webp/.png/.jpg) found."))
+			continue
+		} else if len(imageFiles) > 1 {
+			fmt.Println(red("Error: Multiple image files found. Please leave only one."))
+			continue
 		}
 
-		fileName += "." + ext
+		outputPath := filepath.Join(basePath, "output")
+		processAtlas(jsonFiles[0], imageFiles[0], outputPath)
+		fmt.Println("\n" + green("Done. You can replace the files and type 'y' to split again, or 'n' to quit."))
 	}
-
-	resp, err := http.Get(imageURL)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	outPath := filepath.Join(outputDir, fileName)
-	outFile, err := os.Create(outPath)
-	if err != nil {
-		return err
-	}
-	defer outFile.Close()
-
-	_, err = io.Copy(outFile, resp.Body)
-	return err
 }
