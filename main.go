@@ -11,6 +11,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"golang.org/x/image/webp"
@@ -91,26 +92,62 @@ func red(text string) string {
 	return "\033[31m" + text + "\033[0m"
 }
 
-func processAtlas(jsonPath, imagePath, outputPath string) {
-	jsonData, err := ioutil.ReadFile(jsonPath)
+func parseAtlas(path string) map[string]FrameInfo {
+	data, err := ioutil.ReadFile(path)
 	if err != nil {
 		panic(err)
 	}
-
-	var sheet SpriteSheet
-	err = json.Unmarshal(jsonData, &sheet)
-	if err != nil {
-		panic(err)
+	lines := strings.Split(string(data), "\n")
+	frames := make(map[string]FrameInfo)
+	var name string
+	for i := 0; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
+		if line == "" || strings.HasPrefix(line, "size:") || strings.HasPrefix(line, "format:") ||
+			strings.HasPrefix(line, "filter:") || strings.HasPrefix(line, "repeat:") {
+			continue
+		}
+		if !strings.Contains(line, ":") {
+			name = line
+			continue
+		}
+		if strings.HasPrefix(line, "xy:") && i+1 < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[i+1]), "size:") {
+			xy := strings.Split(strings.TrimSpace(strings.TrimPrefix(line, "xy:")), ",")
+			size := strings.Split(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(lines[i+1]), "size:")), ",")
+			x, _ := strconv.Atoi(strings.TrimSpace(xy[0]))
+			y, _ := strconv.Atoi(strings.TrimSpace(xy[1]))
+			w, _ := strconv.Atoi(strings.TrimSpace(size[0]))
+			h, _ := strconv.Atoi(strings.TrimSpace(size[1]))
+			frames[name+".png"] = FrameInfo{Frame: Frame{X: x, Y: y, W: w, H: h}}
+		}
 	}
+	return frames
+}
 
+func processAtlas(metaPath, imagePath, outputPath string) {
 	atlasImg, err := decodeImage(imagePath)
 	if err != nil {
 		panic(err)
 	}
 
+	frames := make(map[string]FrameInfo)
+	if strings.HasSuffix(metaPath, ".atlas") {
+		frames = parseAtlas(metaPath)
+	} else {
+		jsonData, err := ioutil.ReadFile(metaPath)
+		if err != nil {
+			panic(err)
+		}
+		var sheet SpriteSheet
+		err = json.Unmarshal(jsonData, &sheet)
+		if err != nil {
+			panic(err)
+		}
+		frames = sheet.Frames
+	}
+
 	os.MkdirAll(outputPath, 0755)
 
-	for name, info := range sheet.Frames {
+	for name, info := range frames {
 		rect := image.Rect(info.Frame.X, info.Frame.Y, info.Frame.X+info.Frame.W, info.Frame.Y+info.Frame.H)
 		crop := image.NewRGBA(image.Rect(0, 0, info.Frame.W, info.Frame.H))
 		draw.Draw(crop, crop.Bounds(), atlasImg, rect.Min, draw.Src)
@@ -137,7 +174,7 @@ func main() {
 	for {
 		ensureFolderExists(basePath)
 		fmt.Printf("\n%s\n%s\n",
-			green("[ Step 1 ] Place exactly one .json and one image file (.webp/.png/.jpg) inside this folder:"),
+			green("[ Step 1 ] Place exactly one .json/.atlas and one image file (.webp/.png/.jpg) inside this folder:"),
 			green(basePath))
 		fmt.Print(green("After adding those files, type 'y' to continue or 'n' to quit: "))
 
@@ -150,14 +187,14 @@ func main() {
 
 		ensureFolderExists(basePath)
 
-		jsonFiles := findFilesByExtensions(basePath, []string{".json"})
+		metaFiles := findFilesByExtensions(basePath, []string{".json", ".atlas"})
 		imageFiles := findFilesByExtensions(basePath, []string{".webp", ".png", ".jpg", ".jpeg"})
 
-		if len(jsonFiles) == 0 {
-			fmt.Println(red("Error: No .json file found."))
+		if len(metaFiles) == 0 {
+			fmt.Println(red("Error: No .json or .atlas file found."))
 			continue
-		} else if len(jsonFiles) > 1 {
-			fmt.Println(red("Error: Multiple .json files found. Please leave only one."))
+		} else if len(metaFiles) > 1 {
+			fmt.Println(red("Error: Multiple .json/.atlas files found. Please leave only one."))
 			continue
 		}
 
@@ -170,7 +207,7 @@ func main() {
 		}
 
 		outputPath := filepath.Join(basePath, "output")
-		processAtlas(jsonFiles[0], imageFiles[0], outputPath)
+		processAtlas(metaFiles[0], imageFiles[0], outputPath)
 		fmt.Println("\n" + green("Done. You can replace the files and type 'y' to split again, or 'n' to quit."))
 	}
 }
