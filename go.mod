@@ -4,6 +4,7 @@ go 1.24.3
 
 require (
 	github.com/PuerkitoBio/goquery v1.10.3 // indirect
+	github.com/TheTitanrain/w32 v0.0.0-20180517000239-4f5cfb03fabf // indirect
 	github.com/andybalholm/cascadia v1.3.3 // indirect
 	github.com/bitly/go-simplejson v0.5.1 // indirect
 	github.com/chromedp/cdproto v0.0.0-20250611220608-a17eb1ae8ff0 // indirect
@@ -18,6 +19,7 @@ require (
 	github.com/gobwas/ws v1.4.0 // indirect
 	github.com/google/pprof v0.0.0-20250208200701-d0013a598941 // indirect
 	github.com/kkdai/youtube/v2 v2.10.4 // indirect
+	github.com/sqweek/dialog v0.0.0-20240226140203-065105509627 // indirect
 	golang.org/x/net v0.41.0 // indirect
 	golang.org/x/sys v0.33.0 // indirect
 	golang.org/x/text v0.26.0 // indirect

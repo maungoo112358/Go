@@ -12,8 +12,10 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/kkdai/youtube/v2"
+	"github.com/sqweek/dialog"
 )
 
 func DownloadSelectedFormat(rawUrl string) error {
@@ -21,11 +23,25 @@ func DownloadSelectedFormat(rawUrl string) error {
 	if err != nil {
 		return fmt.Errorf("invalid url: %v", err)
 	}
-	v := parsed.Query().Get("v")
-	if v == "" {
-		return fmt.Errorf("missing video id (v param)")
+
+	var videoID string
+
+	// Handle different YouTube URL formats
+	if strings.Contains(parsed.Host, "youtu.be") {
+		// For youtu.be/VIDEO_ID format
+		videoID = strings.TrimPrefix(parsed.Path, "/")
+	} else if strings.Contains(parsed.Host, "youtube.com") {
+		// For youtube.com/watch?v=VIDEO_ID format
+		videoID = parsed.Query().Get("v")
+	} else {
+		return fmt.Errorf("unsupported URL format")
 	}
-	cleanUrl := "https://www.youtube.com/watch?v=" + v
+
+	if videoID == "" {
+		return fmt.Errorf("missing video id")
+	}
+
+	cleanUrl := "https://www.youtube.com/watch?v=" + videoID
 	fmt.Println("Corrected URL:", cleanUrl)
 
 	headerTransport := roundTripperWithHeaders{
@@ -63,28 +79,44 @@ func DownloadSelectedFormat(rawUrl string) error {
 		return fmt.Errorf("no audio-only format found")
 	}
 
-	videoPath := "video.mp4"
-	audioPath := "audio.m4a"
+	// Create temporary directory for downloads
+	tempDir, err := createTempDir()
+	if err != nil {
+		return fmt.Errorf("failed to create temp directory: %v", err)
+	}
+	defer os.RemoveAll(tempDir) // Clean up temp directory
+
+	// Use temporary files with unique names
+	timestamp := time.Now().UnixNano()
+	videoPath := filepath.Join(tempDir, fmt.Sprintf("video_%d.mp4", timestamp))
+	audioPath := filepath.Join(tempDir, fmt.Sprintf("audio_%d.m4a", timestamp))
+
 	state := &animation.DownloadState{}
 
+	fmt.Println("Downloading video...")
 	err = downloadVideo(&client, video, &videoFormat, videoPath, state)
 	if err != nil {
 		return err
 	}
 
+	fmt.Println("Downloading audio...")
 	err = downloadAudio(&client, video, audioFormat, audioPath)
 	if err != nil {
 		return err
 	}
 
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("failed to get home dir: %v", err)
+	// Create temporary merged file
+	tempOutputPath := filepath.Join(tempDir, fmt.Sprintf("merged_%d.mp4", timestamp))
+
+	fmt.Println("Merging video and audio...")
+	// Use ffmpeg from PATH or current directory
+	ffmpegCmd := "ffmpeg"
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		// If ffmpeg not in PATH, try current directory
+		ffmpegCmd = "./ffmpeg.exe"
 	}
 
-	outputPath := getOutputPath(video, home)
-
-	cmd := exec.Command("./ffmpeg.exe", "-y", "-i", videoPath, "-i", audioPath, "-c", "copy", outputPath)
+	cmd := exec.Command(ffmpegCmd, "-y", "-i", videoPath, "-i", audioPath, "-c", "copy", tempOutputPath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	err = cmd.Run()
@@ -92,21 +124,102 @@ func DownloadSelectedFormat(rawUrl string) error {
 		return fmt.Errorf("ffmpeg merge failed: %v", err)
 	}
 
-	os.Remove(videoPath)
-	os.Remove(audioPath)
+	// Show file dialog to choose save location
+	fmt.Println("Choose where to save the video...")
+	outputPath, err := showSaveDialog(video)
+	if err != nil {
+		return fmt.Errorf("failed to get save location: %v", err)
+	}
+
+	// Move the merged file to the chosen location
+	err = moveFile(tempOutputPath, outputPath)
+	if err != nil {
+		return fmt.Errorf("failed to save file: %v", err)
+	}
 
 	fmt.Println("Download and merge complete:", outputPath)
 	return nil
 }
 
-func getOutputPath(video *youtube.Video, home string) string {
-	downloadDir := filepath.Join(home, "Desktop", "Video-Download")
-	os.MkdirAll(downloadDir, os.ModePerm)
-
+func showSaveDialog(video *youtube.Video) (string, error) {
 	safeTitle := sanitizeFileName(video.Title)
-	outputName := strings.ReplaceAll(safeTitle, " ", "_") + ".mp4"
-	outputPath := filepath.Join(downloadDir, outputName)
-	return outputPath
+	defaultName := strings.ReplaceAll(safeTitle, " ", "_") + ".mp4"
+
+	// Get user's home directory for default location
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = "." // Use current directory as fallback
+	}
+	defaultDir := filepath.Join(home, "Desktop")
+
+	// Show save dialog
+	filename, err := dialog.File().
+		Title("Save Video As").
+		Filter("MP4 Video Files", "mp4").
+		SetStartDir(defaultDir).
+		SetStartFile(defaultName).
+		Save()
+
+	if err != nil {
+		return "", err
+	}
+
+	// Ensure the file has .mp4 extension
+	if !strings.HasSuffix(strings.ToLower(filename), ".mp4") {
+		filename += ".mp4"
+	}
+
+	return filename, nil
+}
+
+func moveFile(src, dst string) error {
+	// Try to rename first (fastest if on same drive)
+	if err := os.Rename(src, dst); err == nil {
+		return nil
+	}
+
+	// If rename fails, copy and delete
+	return copyFile(src, dst)
+}
+
+func copyFile(src, dst string) error {
+	sourceFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer sourceFile.Close()
+
+	// Ensure destination directory exists
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return err
+	}
+
+	destFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer destFile.Close()
+
+	_, err = io.Copy(destFile, sourceFile)
+	if err != nil {
+		return err
+	}
+
+	// Remove source file after successful copy
+	return os.Remove(src)
+}
+
+func createTempDir() (string, error) {
+	// Try to create temp dir in system temp first
+	tempDir, err := os.MkdirTemp("", "youtube_dl_*")
+	if err != nil {
+		// If system temp fails, try current directory
+		tempDir, err = os.MkdirTemp(".", "temp_*")
+		if err != nil {
+			return "", err
+		}
+	}
+	return tempDir, nil
 }
 
 func downloadVideo(client *youtube.Client, video *youtube.Video, format *youtube.Format, path string, state *animation.DownloadState) error {
@@ -115,9 +228,15 @@ func downloadVideo(client *youtube.Client, video *youtube.Video, format *youtube
 		return err
 	}
 
+	// Ensure directory exists
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create directory: %v", err)
+	}
+
 	file, err := os.Create(path)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create video file: %v", err)
 	}
 	defer file.Close()
 
@@ -134,7 +253,11 @@ func downloadVideo(client *youtube.Client, video *youtube.Video, format *youtube
 	state.Mu.Unlock()
 	wg.Wait()
 
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to download video: %v", err)
+	}
+
+	return nil
 }
 
 func downloadAudio(client *youtube.Client, video *youtube.Video, format *youtube.Format, path string) error {
@@ -143,14 +266,24 @@ func downloadAudio(client *youtube.Client, video *youtube.Video, format *youtube
 		return err
 	}
 
+	// Ensure directory exists
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create directory: %v", err)
+	}
+
 	file, err := os.Create(path)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create audio file: %v", err)
 	}
 	defer file.Close()
 
 	_, err = io.Copy(file, stream)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to download audio: %v", err)
+	}
+
+	return nil
 }
 
 func sanitizeFileName(name string) string {
